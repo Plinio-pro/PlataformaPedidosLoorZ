@@ -1,4 +1,3 @@
-// Interceptor que mide cada petición (tarea en clase).
 import { Request, Response, NextFunction } from "express";
 
 const UMBRAL_LENTA_MS = Number(process.env.UMBRAL_LENTA_MS ?? 1000);
@@ -16,12 +15,32 @@ export function medirLatencia(req: Request, res: Response, next: NextFunction): 
   const inicio = performance.now();
   res.on("finish", () => {
     // TODO 1: calcula la duración en ms
-    // TODO 2: busca la estadística de `${req.method} ${req.path}` (créala si no existe)
-    // TODO 3: actualiza peticiones, totalMs, maxMs y lentas (ms > UMBRAL_LENTA_MS)
+    const duracion = performance.now() - inicio;
+    
+    // TODO 2: busca la estadística (créala si no existe)
+    const clave = `${req.method} ${req.path}`;
+    const est = porRuta.get(clave) ?? { peticiones: 0, totalMs: 0, maxMs: 0, lentas: 0 };
+    
+    // TODO 3: actualiza peticiones, totalMs, maxMs y lentas
+    est.peticiones++;
+    est.totalMs += duracion;
+    if (duracion > est.maxMs) est.maxMs = duracion;
+    if (duracion > UMBRAL_LENTA_MS) est.lentas++;
+    
+    porRuta.set(clave, est);
   });
   next(); // sin next(), la petición nunca llega a la ruta
 }
 
 export function resumenMetricas() {
-  // TODO 4: devuelve { umbralLentaMs, rutas: [{ ruta, peticiones, promedioMs, maxMs, lentas }] }
+  // TODO 4: devuelve el resumen
+  const rutas = [...porRuta.entries()].map(([ruta, e]) => ({
+    ruta,
+    peticiones: e.peticiones,
+    promedioMs: e.totalMs / e.peticiones,
+    maxMs: e.maxMs,
+    lentas: e.lentas
+  }));
+
+  return { umbralLentaMs: UMBRAL_LENTA_MS, rutas };
 }
