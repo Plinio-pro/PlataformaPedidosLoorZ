@@ -20,6 +20,14 @@ const porRuta = new Map<string, Estadistica>();
 export function medirLatencia(req: Request, res: Response, next: NextFunction): void {
   const inicio = performance.now();
   res.on("finish", () => {
+    // TODO 1: calcula la duración en ms
+    const duracion = performance.now() - inicio;
+    
+    // TODO 2: busca la estadística (créala si no existe)
+    const clave = `${req.method} ${req.path}`;
+    const est = porRuta.get(clave) ?? { peticiones: 0, totalMs: 0, maxMs: 0, lentas: 0 };
+    
+    // TODO 3: actualiza peticiones, totalMs, maxMs y lentas
     const duracion = performance.now() - inicio;
     const clave = `${req.method} ${req.path}`;
     const est = porRuta.get(clave) ?? { peticiones: 0, totalMs: 0, maxMs: 0, lentas: 0 };
@@ -31,6 +39,11 @@ export function medirLatencia(req: Request, res: Response, next: NextFunction): 
     
     porRuta.set(clave, est);
   });
+  next(); // sin next(), la petición nunca llega a la ruta
+}
+
+export function resumenMetricas() {
+  // TODO 4: devuelve el resumen
   next();
 }
 
@@ -43,6 +56,7 @@ export function resumenMetricas() {
     lentas: e.lentas
   }));
 
+  return { umbralLentaMs: UMBRAL_LENTA_MS, rutas };
   // Extraemos las métricas del Event Loop convirtiendo de nanosegundos a ms
   const p50Ms = Math.round(retardoBucle.percentile(50) / 1e6);
   const p99Ms = Math.round(retardoBucle.percentile(99) / 1e6);
