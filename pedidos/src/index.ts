@@ -1,14 +1,8 @@
 import express, { Request, Response } from "express";
-import { error } from "node:console";
-import { randomUUID } from "node:crypto"; //Para valores aleatorios
+import { randomUUID } from "node:crypto"; // Para valores aleatorios
+import { Worker } from "node:worker_threads";
+import path from "node:path";
 import { contarPrimos } from "./calculo";
-import { Worker } from "node:worker_threads";
-import path from "node:path";
-import { medirLatencia, resumenMetricas } from "./metricas"; // <-- IMPORTACIÓN
-
-// Importaciones necesarias para la actividad actual
-import { Worker } from "node:worker_threads";
-import path from "node:path";
 import { medirLatencia, resumenMetricas } from "./metricas";
 import { contarPrimosEnPool, estadoPool } from "./pool";
 
@@ -28,7 +22,7 @@ const pedidos: Pedido[] = [];
 const app = express();
 
 app.use(express.json());
-app.use(medirLatencia); // <-- INTERCEPTOR REGISTRADO AQUÍ
+app.use(medirLatencia); // Interceptor registrado aquí
 
 app.get("/health", (_req: Request, res: Response) => {
   res.json({ status: "ok", servicio: "pedidos" });
@@ -42,29 +36,6 @@ app.get("/health/ready", async (_req: Request, res: Response) => {
     if (!r.ok) {
       res.status(503).json({ status: "no-listo", inventario: "respondió HTTP " + r.status, ms });
       return;
-app.use(medirLatencia); // <-- Interceptor registrado aquí
-
-app.get("/health", (_req: Request, res: Response) => {
-    res.json({ status: "ok", servicio: "pedidos" });
-});
-
-app.get("/health/ready", async (_req: Request, res: Response) => {
-    const inicio = performance.now();
-    try {
-        const r = await fetch(`${INVENTARIO_URL}/health`, { signal: AbortSignal.timeout(1000) });
-        const ms = Math.round(performance.now() - inicio);
-        if (!r.ok) {
-            res.status(503).json({ status: "no-listo", inventario: "respondió HTTP " + r.status, ms });
-            return;
-        }
-        res.json({ status: "listo", inventario: "ok", ms });
-    } catch (error) {
-        const ms = Math.round(performance.now() - inicio);
-        const e = error as Error & { cause?: { code?: string } };
-        const motivo = e.name === "TimeoutError"
-            ? "timeout: no contestó en 1000ms"
-            : "no se pudo conectar (" + (e.cause?.code ?? e.message) + ")";
-        res.status(503).json({ status: "no-listo", inventario: motivo, ms });
     }
     res.json({ status: "listo", inventario: "ok", ms });
   } catch (error) {
@@ -84,10 +55,10 @@ app.get("/pedidos", (_req: Request, res: Response) => {
 app.post("/pedidos", async (req: Request, res: Response) => {
   const { sku, cantidad } = req.body ?? {};
   if (typeof sku !== "string" || typeof cantidad !== "number" || cantidad <= 0) {
-    res.status(400).json({ error: " tipos de datos incorrectos o cantidad negativa" });
+    res.status(400).json({ error: "tipos de datos incorrectos o cantidad negativa" });
     return;
   }
-  const inicio = performance.now(); 
+  const inicio = performance.now(); // para tomar el tiempo de inicio
 
   try {
     const r = await fetch(`${INVENTARIO_URL}/stock/${encodeURIComponent(sku)}/reservar`, {
@@ -99,33 +70,45 @@ app.post("/pedidos", async (req: Request, res: Response) => {
     if (r.status === 404) {
       res.status(404).json({ error: "sku no existe en inventario" });
       return;
-    };
+    }
     if (r.status === 409) {
       const detalle = await r.json().catch(() => null);
       res.status(409).json({ error: "stock insuficiente", detalle });
       return;
-    };
+    }
     if (!r.ok) {
       const detalle = await r.json().catch(() => null);
       res.status(r.status).json({ error: "inventario rechazó la reserva", detalle });
       return;
-    };
+    }
     const pedido: Pedido = { id: randomUUID(), sku, cantidad, creadoEn: new Date().toISOString() };
     pedidos.push(pedido);
     res.status(201).json(pedido);
   } catch (error) {
     const duracionMS = Math.round(performance.now() - inicio);
     const e = error as Error & { cause?: { code?: string } };
-    const motivo = e.name === "TimeOutError" ? "Inventario no contestó en " + TIMEOUT_MS + "ms" : " NO SE PUDO CONECTAR CON INVENTARIO" + (e.cause);
-    console.error(pedidos + " " + motivo);
-    res.status(503).json({ error: "inventario no disponible " + motivo, duracionMS });
+    const motivo = e.name === "TimeoutError"
+      ? "Inventario no contestó en " + TIMEOUT_MS + "ms"
+      : "no se pudo conectar con inventario (" + (e.cause?.code ?? e.message) + ")";
+    console.error("pedido sku=" + sku + ": " + motivo);
+    res.status(503).json({ error: "inventario no disponible: " + motivo, duracionMS });
   }
 });
 
 function leerN(req: Request): number {
   const n = Number(req.query.n ?? REPORTE_N);
   return Number.isInteger(n) && n > 0 && n <= 50_000_000 ? n : REPORTE_N;
-};
+}
+
+// Un worker nuevo por petición, sin límite (para comparar con el pool)
+function contarPrimosEnWorker(n: number): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const archivo = path.join(__dirname, "worker-reporte.js");
+    const w = new Worker(archivo, { workerData: { n } });
+    w.once("message", (primos: number) => resolve(primos));
+    w.once("error", reject);
+  });
+}
 
 app.get("/reporte/bloqueante", (req: Request, res: Response) => {
   const n = leerN(req);
@@ -135,141 +118,45 @@ app.get("/reporte/bloqueante", (req: Request, res: Response) => {
   res.json({ modo: "bloqueando", n, primos, duracionMS });
 });
 
-function contarPrimosenWorker(n: number): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const archivo = path.join(__dirname, "worker-reporte.js");
-    const w = new Worker(archivo, { workerData: { n } });
-    w.once("message", (primos: number) => resolve(primos));
-    w.once("error", reject);
-  });
-};
-
 app.get("/reporte/worker", async (req: Request, res: Response) => {
   const n = leerN(req);
   const inicio = performance.now();
-  const primos = await contarPrimosenWorker(n);
-  const duracionMS = Math.round(performance.now() - inicio);
-  res.json({ modo: "worker", n, primos, duracionMS });
-});
-
-// <-- RUTA DE MÉTRICAS -->
-app.get("/metricas", (req: Request, res: Response) => {
-  res.json(resumenMetricas());
-});
-
-app.listen(PORT, () => {
-  console.log("servicio depedidos escuchando en el puerto: " + PORT + " inventario: " + INVENTARIO_URL + " timeout: " + TIMEOUT_MS + "ms")
-    res.json(pedidos);
-});
-
-app.post("/pedidos", async (req: Request, res: Response) => {
-    const { sku, cantidad } = req.body ?? {};
-    if (typeof sku !== "string" || typeof cantidad !== "number" || cantidad <= 0) {
-        res.status(400).json({ error: " tipos de datos incorrectos o cantidad negativa" });
-        return;
-    }
-    const inicio = performance.now(); // pa tomar el tiempo de inicio
-
-    try {
-        const r = await fetch(`${INVENTARIO_URL}/stock/${encodeURIComponent(sku)}/reservar`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ cantidad }),
-            signal: AbortSignal.timeout(TIMEOUT_MS),
-        });
-        if (r.status === 404) {
-            res.status(404).json({ error: "sku no existe en inventario" });
-            return;
-        };
-        if (r.status === 409) {
-            const detalle = await r.json().catch(() => null);
-            res.status(409).json({ error: "stock insuficiente", detalle });
-            return;
-        };
-        if (!r.ok) {
-            const detalle = await r.json().catch(() => null);
-            res.status(r.status).json({ error: "inventario rechazó la reserva", detalle });
-            return;
-        };
-        const pedido: Pedido = { id: randomUUID(), sku, cantidad, creadoEn: new Date().toISOString() };
-        pedidos.push(pedido);
-        res.status(201).json(pedido);
-    } catch (error) {
-        const duracionMS = Math.round(performance.now() - inicio);
-        const e = error as Error & { cause?: { code?: string } };
-        const motivo = e.name === "TimeOutError" ? "Inventario no contestó en " + TIMEOUT_MS + "ms" : " NO SE PUDO CONECTAR CON INVENTARIO" + (e.cause);
-        console.error(pedidos + " " + motivo);
-        res.status(503).json({ error: "inventario no disponible " + motivo, duracionMS });
-    }
-});
-
-function leerN(req: Request): number {
-    const n = Number(req.query.n ?? REPORTE_N);
-    return Number.isInteger(n) && n > 0 && n <= 50_000_000 ? n : REPORTE_N;
-}
-
-// Función matemática autoconteida (sin dependencias extrañas)
-function contarPrimos(limite: number): number {
-    let cantidad = 0;
-    for (let i = 2; i <= limite; i++) {
-        let esPrimo = true;
-        for (let j = 2; j * j <= i; j++) {
-            if (i % j === 0) { esPrimo = false; break; }
-        }
-        if (esPrimo) cantidad++;
-    }
-    return cantidad;
-}
-
-app.get("/reporte/bloqueante", (req: Request, res: Response) => {
-    const n = leerN(req);
-    const inicio = performance.now();
-    const primos = contarPrimos(n);
-    const duracionMS = Math.round(performance.now() - inicio);
-    res.json({ modo: "bloqueando", n, primos, duracionMS });
-});
-
-function contarPrimosenWorker(n: number): Promise<number> {
-    return new Promise((resolve, reject) => {
-        const archivo = path.join(__dirname, "worker-reporte.js");
-        const w = new Worker(archivo, { workerData: { n } });
-        w.once("message", (primos: number) => resolve(primos));
-        w.once("error", reject);
-    });
-}
-
-app.get("/reporte/worker", async (req: Request, res: Response) => {
-    const n = leerN(req);
-    const inicio = performance.now();
-    const primos = await contarPrimosenWorker(n);
+  try {
+    const primos = await contarPrimosEnWorker(n);
     const duracionMS = Math.round(performance.now() - inicio);
     res.json({ modo: "worker", n, primos, duracionMS });
+  } catch {
+    res.status(500).json({ error: "Error interno" });
+  }
 });
 
 app.get("/reporte/pool", async (req: Request, res: Response) => {
-    const n = leerN(req);
-    const inicio = performance.now();
-    try {
-        const primos = await contarPrimosEnPool(n);
-        const duracionMS = Math.round(performance.now() - inicio);
-        res.json({ modo: "pool", n, primos, duracionMS });
-    } catch (error) {
-        const e = error as Error;
-        if (e.name === "PoolLleno") {
-            res.status(503).header("Retry-After", "1").json({
-                error: "Pool lleno",
-                estado: estadoPool()
-            });
-        } else {
-            res.status(500).json({ error: "Error interno" });
-        }
+  const n = leerN(req);
+  const inicio = performance.now();
+  try {
+    const primos = await contarPrimosEnPool(n);
+    const duracionMS = Math.round(performance.now() - inicio);
+    res.json({ modo: "pool", n, primos, duracionMS });
+  } catch (error) {
+    const e = error as Error;
+    if (e.name === "PoolLleno") {
+      res.status(503).header("Retry-After", "1").json({
+        error: "Pool lleno",
+        estado: estadoPool(),
+      });
+    } else {
+      res.status(500).json({ error: "Error interno" });
     }
+  }
 });
 
-app.get("/metricas", (req: Request, res: Response) => {
-    res.json({ ...resumenMetricas(), pool: estadoPool() });
+app.get("/metricas", (_req: Request, res: Response) => {
+  res.json({ ...resumenMetricas(), pool: estadoPool() });
 });
 
 app.listen(PORT, () => {
-    console.log("servicio depedidos escuchando en el puerto: " + PORT + " inventario: " + INVENTARIO_URL + " timeout: " + TIMEOUT_MS + "ms")
+  console.log(
+    "servicio de pedidos escuchando en el puerto: " + PORT +
+    " inventario: " + INVENTARIO_URL + " timeout: " + TIMEOUT_MS + "ms"
+  );
 });
