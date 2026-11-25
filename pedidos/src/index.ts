@@ -5,10 +5,11 @@ import path from "node:path";
 import { contarPrimos } from "./calculo";
 import { medirLatencia, resumenMetricas } from "./metricas";
 import { contarPrimosEnPool, estadoPool } from "./pool";
+import {llamar, aHttp} from "./inventario-grcp";
 
 const PORT = Number(process.env.PORT ?? 3000);
 const INVENTARIO_URL = process.env.INVENTARIO_URL ?? "http://localhost:3001";
-const TIMEOUT_MS = Number(process.env.TIMEOUT_MS ?? 2000);
+const TIMEOUT_MS = Number(process.env.TIMEOUT_MS ?? 500);
 const REPORTE_N = Number(process.env.REPORTE_N ?? 8_000_000);
 
 interface Pedido {
@@ -54,12 +55,26 @@ app.get("/pedidos", (_req: Request, res: Response) => {
 
 app.post("/pedidos", async (req: Request, res: Response) => {
   const { sku, cantidad } = req.body ?? {};
-  if (typeof sku !== "string" || typeof cantidad !== "number" || cantidad <= 0) {
+  if (typeof sku !== "string" || !Number.isInteger(cantidad) || cantidad <= 0 || cantidad > 2147483647) {
     res.status(400).json({ error: "tipos de datos incorrectos o cantidad negativa" });
     return;
   }
   const inicio = performance.now(); // para tomar el tiempo de inicio
+  // nueva llamada por gpc
+  try{
+    await llamar<{sku:string;reservado:number;restante:number}>("Reservar", {sku, cantidad});
+    const pedido: Pedido = { id: randomUUID(), sku, cantidad, creadoEn: new Date().toISOString() };
+    pedidos.push(pedido);
+    res.status(201).json(pedido);
+  } catch(error){
+      const duracionMS = Math.round(performance.now() - inicio);
+      const {status, cuerpo} = aHttp(error);
+      console.error("[pedidos]"+ cuerpo.error + ":"+ cuerpo.motivo);
+      res.status(status).json({...cuerpo,duracionMS});
+    }
 
+});
+/*
   try {
     const r = await fetch(`${INVENTARIO_URL}/stock/${encodeURIComponent(sku)}/reservar`, {
       method: "POST",
@@ -94,6 +109,7 @@ app.post("/pedidos", async (req: Request, res: Response) => {
     res.status(503).json({ error: "inventario no disponible: " + motivo, duracionMS });
   }
 });
+*/
 
 function leerN(req: Request): number {
   const n = Number(req.query.n ?? REPORTE_N);
